@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FAKE ESP 设置</title>
+<style>
+  :root {
+    --bg: #1e2127;
+    --panel: #262a33;
+    --line: #363b47;
+    --text: #d8dde8;
+    --dim: #8b93a5;
+    --accent: #4a9eff;
+    --on: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.5 "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  body { padding: 10px 12px 22px; overflow-x: hidden; }
+
+  header {
+    display: flex; align-items: center; gap: 8px;
+    padding-bottom: 8px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--bg); z-index: 5;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .5px; white-space: nowrap; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #f87171; flex: 0 0 auto; }
+  #dot.ok { background: var(--on); }
+  #stat { font-size: 11px; color: var(--dim); margin-left: auto; text-align: right; line-height: 1.3;
+          min-width: 0; overflow: hidden; white-space: nowrap; }
+
+  .group { margin-bottom: 14px; }
+  .group > h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--dim); margin: 0 0 6px; font-weight: 600;
+  }
+
+  /* 右侧控件列固定 116px；左侧必须写 minmax(0,1fr)，
+     否则内容的最小宽度会把整行撑宽，把开关列挤出视口 */
+  .row {
+    display: grid; grid-template-columns: minmax(0, 1fr) 116px; gap: 8px;
+    align-items: center; padding: 4px 0;
+  }
+  .row > * { min-width: 0; }
+  .row + .row { border-top: 1px solid rgba(255,255,255,.04); }
+  .row label { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hint { grid-column: 1 / -1; font-size: 11px; color: var(--dim); margin: -2px 0 4px; }
+
+  /* input[type=range] 在 Chromium 里有固有最小宽度，不写 min-width:0 会撑破布局 */
+  input[type=range] { width: 100%; min-width: 0; accent-color: var(--accent); }
+  .num {
+    font-variant-numeric: tabular-nums; font-size: 12px; text-align: right;
+    color: var(--accent);
+  }
+  .slider-cell { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 6px; align-items: center; min-width: 0; }
+
+  select {
+    width: 100%; min-width: 0; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; font-size: 12px;
+  }
+
+  /* 开关 */
+  .sw { position: relative; width: 40px; height: 21px; justify-self: end; flex: 0 0 auto; }
+  .sw input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .sw span {
+    position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+    border-radius: 11px; background: #414856;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.35);
+    transition: background .12s;
+  }
+  .sw span::after {
+    content: ""; position: absolute; top: 3px; left: 3px;
+    width: 15px; height: 15px; border-radius: 50%; background: #fff;
+    transition: transform .12s;
+  }
+  .sw input:checked + span { background: var(--on); }
+  .sw input:checked + span::after { transform: translateX(19px); }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  button {
+    flex: 1 1 90px; min-width: 0;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 6px 8px; font-size: 12px; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  button:hover { border-color: var(--accent); color: #fff; }
+  button.primary { background: #2b4a72; border-color: #3a6ea5; }
+  button.danger { background: #5a2b2b; border-color: #8b3a3a; }
+
+  footer { margin-top: 16px; font-size: 11px; color: var(--dim); line-height: 1.6; }
+  code { background: rgba(255,255,255,.07); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span id="dot"></span>
+  <h1>FAKE ESP 设置</h1>
+  <div id="stat">连接中…</div>
+</header>
+
+<div id="root"></div>
+
+<!-- 控件表由 /spec 动态生成：加新效果时这里不需要改 -->
+<div class="group">
+  <h2>快捷操作</h2>
+  <div class="actions">
+    <button id="btn-recenter">视角回中</button>
+    <button id="btn-hide">一键隐身</button>
+    <button class="danger" id="btn-reset">恢复默认设置</button>
+  </div>
+</div>
+
+<footer>
+  这个面板可以直接拖进 OBS 当「自定义浏览器面板 (Dock)」用：<br>
+  OBS 菜单 <b>视图 → 自定义浏览器面板</b>，名称随意，URL 填 <code>http://127.0.0.1:17777/tune</code><br>
+  改任何一项都会立刻生效，不需要重启 OBS，也不用记任何热键。<br>
+  只有两个热键：<code>Ins</code> 一键隐身 · <code>Home</code> 视角回中
+</footer>
+
+<script>
+(() => {
+  'use strict';
+
+  const root = document.getElementById('root');
+  const dot = document.getElementById('dot');
+  const stat = document.getElementById('stat');
+
+  let spec = null;
+  let state = null;
+  let connected = false;
+  const widgets = new Map();  // key -> { set(value) }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ---------------------------------------------------------------- 与桥接通信
+
+  async function send(query) {
+    try {
+      const res = await fetch('set?' + query, { cache: 'no-store' });
+      const json = await res.json();
+      return json;
+    } catch (err) {
+      connected = false;
+      return null;
+    }
+  }
+
+  async function loadSpec() {
+    const res = await fetch('spec', { cache: 'no-store' });
+    return res.json();
+  }
+
+  // ---------------------------------------------------------------- 构建控件
+
+  /** 兼容 camelCase / PascalCase 两种命名：桥接那边一旦换了序列化设置，
+   *  这里不至于静默变成空白界面（这个坑踩过一次）。 */
+  function normalize(item) {
+    const pick = (a, b) => (item[a] !== undefined ? item[a] : item[b]);
+    return {
+      group: pick('group', 'Group') || '其它',
+      key: pick('key', 'Key'),
+      label: pick('label', 'Label') || pick('key', 'Key'),
+      type: pick('type', 'Type') || 'bool',
+      min: pick('min', 'Min'),
+      max: pick('max', 'Max'),
+      step: pick('step', 'Step'),
+      options: pick('options', 'Options'),
+      hint: pick('hint', 'Hint')
+    };
+  }
+
+  function buildControls() {
+    const groups = new Map();
+    for (const raw of spec) {
+      const item = normalize(raw);
+      if (!item.key) continue;
+      if (!groups.has(item.group)) groups.set(item.group, []);
+      groups.get(item.group).push(item);
+    }
+
+    let built = 0;
+    for (const [groupName, items] of groups) {
+      const box = document.createElement('div');
+      box.className = 'group';
+      const h = document.createElement('h2');
+      h.textContent = groupName;
+      box.appendChild(h);
+
+      for (const item of items) {
+        box.appendChild(buildRow(item));
+        built++;
+      }
+      root.appendChild(box);
+    }
+
+    // 一个控件都没建出来就明确报错，而不是留一片空白让人猜
+    if (built === 0) {
+      root.innerHTML = '<div class="group"><h2>控件表为空</h2>' +
+        '<div class="hint">/spec 返回了 ' + (spec ? spec.length : 'null') +
+        ' 项但一项都没能识别。请检查 /spec 的字段名。</div></div>';
+    }
+  }
+
+  function buildRow(item) {
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const label = document.createElement('label');
+    label.textContent = item.label;
+    if (item.hint) label.title = item.hint;
+    row.appendChild(label);
+
+    if (item.type === 'bool') {
+      const sw = document.createElement('div');
+      sw.className = 'sw';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      const knob = document.createElement('span');
+      sw.appendChild(input);
+      sw.appendChild(knob);
+      row.appendChild(sw);
+
+      input.addEventListener('change', () => send(item.key + '=' + (input.checked ? '1' : '0')));
+      widgets.set(item.key, { set: (v) => { input.checked = !!v; } });
+    } else if (item.type === 'range') {
+      const cell = document.createElement('div');
+      cell.className = 'slider-cell';
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = item.min;
+      input.max = item.max;
+      input.step = item.step;
+      const num = document.createElement('div');
+      num.className = 'num';
+      cell.appendChild(input);
+      cell.appendChild(num);
+      row.appendChild(cell);
+
+      const decimals = (String(item.step).split('.')[1] || '').length;
+      const show = (v) => { num.textContent = Number(v).toFixed(decimals); };
+      show(input.value);
+
+      input.addEventListener('input', () => {
+        show(input.value);
+        send(item.key + '=' + input.value);
+      });
+      widgets.set(item.key, {
+        set: (v) => {
+          if (v === undefined || v === null) return;
+          if (document.activeElement === input) return; // 正在拖就别抢
+          input.value = v;
+          show(v);
+        }
+      });
+    } else if (item.type === 'choice') {
+      const sel = document.createElement('select');
+      for (const opt of item.options || []) {
+        const parts = String(opt).split('|');
+        const o = document.createElement('option');
+        o.value = parts.length > 1 ? parts[1] : parts[0];
+        o.textContent = parts[0];
+        sel.appendChild(o);
+      }
+      row.appendChild(sel);
+      sel.addEventListener('change', () => send(item.key + '=' + encodeURIComponent(sel.value)));
+      widgets.set(item.key, { set: (v) => { if (v !== undefined) sel.value = v; } });
+    }
+
+    const wrap = document.createDocumentFragment();
+    wrap.appendChild(row);
+    if (item.hint) {
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = item.hint;
+      wrap.appendChild(hint);
+    }
+    const holder = document.createElement('div');
+    holder.appendChild(wrap);
+    return holder;
+  }
+
+  // ---------------------------------------------------------------- 轮询同步
+
+  async function pump() {
+    for (;;) {
+      try {
+        const res = await fetch('state', { cache: 'no-store' });
+        state = await res.json();
+        connected = true;
+      } catch (err) {
+        connected = false;
+      }
+
+      if (state && state.opts) {
+        for (const [key, widget] of widgets) widget.set(state.opts[key]);
+      }
+
+      dot.classList.toggle('ok', connected);
+      if (connected && state) {
+        const onScreen = (state.boxes || []).length;
+        stat.innerHTML = '已连接 · 目标 ' + onScreen + '<br>' +
+          '模拟 ' + (state.simHz || 0).toFixed(0) + 'Hz · FOV ' + state.opts.fov;
+      } else {
+        stat.textContent = '连接不到桥接';
+      }
+
+      await sleep(400);
+    }
+  }
+
+  // ---------------------------------------------------------------- 按钮
+
+  function wireButtons() {
+    document.getElementById('btn-recenter').addEventListener('click', () => send('recenter=1'));
+    document.getElementById('btn-reset').addEventListener('click', () => send('reset=1'));
+    document.getElementById('btn-hide').addEventListener('click', () => send('enabled=0'));
+  }
+
+  (async () => {
+    try {
+      spec = await loadSpec();
+    } catch (err) {
+      root.innerHTML = '<div class="group"><h2>连不上桥接</h2>' +
+        '<div class="hint">先启动 FakeEsp.exe，再刷新本页。</div></div>';
+      return;
+    }
+    buildControls();
+    wireButtons();
+    pump();
+  })();
+})();
+</script>
+</body>
+</html>

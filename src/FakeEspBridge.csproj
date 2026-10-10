@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- WinForms 只为了 Program 里的 MessageBox（单实例冲突时提示），WindowsDesktop 共享框架自带，不需要任何 NuGet 包 -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>FakeEsp</AssemblyName>
+    <RootNamespace>FakeEsp</RootNamespace>
+
+    <!-- exe 的文件图标 + 任务栏图标。多尺寸（16~256）由 _dev/tools/make-icon.py 生成 -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <Version>0.2.0</Version>
+    <Product>FAKE ESP</Product>
+    <Company>HachiiXuan</Company>
+    <Description>假的透视外挂特效 —— 纯娱乐，与任何游戏无关</Description>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>embedded</DebugType>
+    <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 让 WPF 主窗口也能用同一个 ico 当标题栏图标 -->
+    <Resource Include="app.ico" />
+  </ItemGroup>
+
+</Project>

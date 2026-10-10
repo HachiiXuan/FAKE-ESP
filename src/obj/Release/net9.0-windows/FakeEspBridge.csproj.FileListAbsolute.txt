@@ -1,0 +1,13 @@
+F:\Deepseek Harness Workspace\fake-esp\src\bin\Release\net9.0-windows\FakeEsp.exe
+F:\Deepseek Harness Workspace\fake-esp\src\bin\Release\net9.0-windows\FakeEsp.deps.json
+F:\Deepseek Harness Workspace\fake-esp\src\bin\Release\net9.0-windows\FakeEsp.runtimeconfig.json
+F:\Deepseek Harness Workspace\fake-esp\src\bin\Release\net9.0-windows\FakeEsp.dll
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\FakeEsp.g.resources
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\FakeEspBridge.GeneratedMSBuildEditorConfig.editorconfig
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\FakeEspBridge.AssemblyInfoInputs.cache
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\FakeEspBridge.AssemblyInfo.cs
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\FakeEspBridge.csproj.CoreCompileInputs.cache
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\FakeEsp.dll
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\refint\FakeEsp.dll
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\FakeEspBridge.genruntimeconfig.cache
+F:\Deepseek Harness Workspace\fake-esp\src\obj\Release\net9.0-windows\ref\FakeEsp.dll
