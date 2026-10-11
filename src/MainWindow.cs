@@ -74,7 +74,7 @@ internal sealed class MainWindow : Window
 
         Title = "FAKE ESP";
         Width = 440;
-        Height = 860;
+        Height = 920;
         Background = new SolidColorBrush(Bg);
         Foreground = new SolidColorBrush(Fg);
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -368,13 +368,19 @@ internal sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center
         };
 
+        // 值为 0 时可以显示成"关闭"之类的文字（例如"视角回正间隔 = 0"其实是关闭）
+        string Fmt(double v) =>
+            (spec.ZeroLabel != null && Math.Abs(v) < 1e-9)
+                ? spec.ZeroLabel
+                : v.ToString(format, CultureInfo.InvariantCulture);
+
         var current = ReadDouble(spec.Key, min);
         slider.Value = Math.Clamp(current, min, max);
-        box.Text = current.ToString(format, CultureInfo.InvariantCulture);
+        box.Text = Fmt(current);
 
         slider.ValueChanged += (_, e) =>
         {
-            box.Text = e.NewValue.ToString(format, CultureInfo.InvariantCulture);
+            box.Text = Fmt(e.NewValue);
             // 拖动过程中也不断提交，方便一边看一边调
             Apply(spec.Key, e.NewValue.ToString(CultureInfo.InvariantCulture));
         };
@@ -390,7 +396,7 @@ internal sealed class MainWindow : Window
             var value = ReadDouble(spec.Key, min);
             if (Math.Abs(slider.Value - value) < 1e-9) return;
             slider.Value = Math.Clamp(value, min, max);
-            box.Text = value.ToString(format, CultureInfo.InvariantCulture);
+            box.Text = Fmt(value);
         };
 
         return grid;

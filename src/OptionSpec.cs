@@ -21,6 +21,9 @@ internal sealed class ControlSpec
     /// <summary>choice 类型的候选项："显示文字|实际值" 或直接 "值"</summary>
     public string[]? Options { get; set; }
 
+    /// <summary>range 类型专用：值为 0 时显示这段文字（例如"关闭"），而不是显示 0</summary>
+    public string? ZeroLabel { get; set; }
+
     public string? Hint { get; set; }
 }
 
@@ -53,6 +56,35 @@ internal static class OptionSpec
             Hint = "默认关。开启后相机会自己轻微摆动，但如果鼠标输入没通，它会掩盖这个问题"
         },
 
+        // ---------------- 视角稳定 ----------------
+        // 说明：这里全部针对**垂直**方向（俯仰）。
+        // 水平方向（yaw）不需要回正 —— 目标是围绕当前 yaw 生成和重生的，
+        // yaw 漂到哪目标簇就跟到哪，根本不会把框漂丢。
+        // 真正会漂的是俯仰：目标站在地上、相机在 1.7m，pitch 一歪框就整体沉出屏幕。
+        new ControlSpec
+        {
+            Group = "视角稳定", Key = "lockPitch", Label = "锁定垂直轴", Type = "bool",
+            Hint = "最彻底的做法：完全禁止上下移动，俯仰恒为水平。框永远贴着地平线，代价是抬头低头时框不会跟着动"
+        },
+        new ControlSpec
+        {
+            Group = "视角稳定", Key = "recenterInterval", Label = "垂直回正间隔 (秒)", Type = "range",
+            Min = 0, Max = 60, Step = 1, ZeroLabel = "关闭",
+            Hint = "设 10 = 每 10 秒把俯仰平滑拉回水平。允许上下看，但会定期归位；是 3 秒缓入缓出滑回去，不是瞬跳"
+        },
+        new ControlSpec
+        {
+            Group = "视角稳定", Key = "softRecenter", Label = "垂直软回正 (°/秒)", Type = "range",
+            Min = 0, Max = 30, Step = 1, ZeroLabel = "关闭",
+            Hint = "持续以这个速度把俯仰往水平拉，偏差永远积不起来。8~15 比较自然；比「锁定垂直轴」柔和"
+        },
+        new ControlSpec
+        {
+            Group = "视角稳定", Key = "minInView", Label = "视野内最少目标数", Type = "range",
+            Min = 0, Max = 20, Step = 1, ZeroLabel = "关闭",
+            Hint = "设成 4~8（别等于框数量，会挤）。一直按 W 往前跑时，跑出视野的框会被搬到前方远处重新出现"
+        },
+
         // ---------------- 画面元素 ----------------
         new ControlSpec { Group = "画面元素", Key = "worldBoxes", Label = "3D 线框盒子", Type = "bool", Hint = "转视角能看出体积感" },
         new ControlSpec { Group = "画面元素", Key = "dist", Label = "距离数字", Type = "bool" },
@@ -61,8 +93,6 @@ internal static class OptionSpec
         new ControlSpec { Group = "画面元素", Key = "names", Label = "目标假名字", Type = "bool" },
         new ControlSpec { Group = "画面元素", Key = "headMarker", Label = "头顶小标记", Type = "bool" },
         new ControlSpec { Group = "画面元素", Key = "offscreen", Label = "屏外方向箭头", Type = "bool" },
-        new ControlSpec { Group = "画面元素", Key = "groundCross", Label = "落地参考线", Type = "bool" },
-        new ControlSpec { Group = "画面元素", Key = "grid", Label = "地面网格", Type = "bool" },
         new ControlSpec { Group = "画面元素", Key = "radar", Label = "右下角雷达", Type = "bool" },
         new ControlSpec { Group = "画面元素", Key = "weapons", Label = "中心准星圈", Type = "bool" },
 
@@ -73,6 +103,11 @@ internal static class OptionSpec
         {
             Group = "观感", Key = "color", Label = "框颜色", Type = "choice",
             Options = new[] { "白色|#ffffff", "浅绿|#7dff9b", "红色|#ff5a5a", "黄色|#ffe066", "青色|#66e0ff", "品红|#ff66ff" }
+        },
+        new ControlSpec
+        {
+            Group = "观感", Key = "rainbow", Label = "彩虹线框", Type = "bool",
+            Hint = "框线、四角括号、3D 线框按屏幕横向位置取彩虹色并缓慢流动；文字/血条/连线仍用上面的框颜色"
         },
         new ControlSpec
         {

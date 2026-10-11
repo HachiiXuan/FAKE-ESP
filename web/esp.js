@@ -23,6 +23,13 @@
   // 左下角的调试信息默认不显示（会盖在画面/录像上），加 ?debug=1 才打开
   const WANT_STATUS = params.get('debug') === '1';
 
+  // 准星到目标最多连几条线（取离准星最近的那几个）
+  const TRACER_MAX = 5;
+
+  // 上一帧实际画了几条连线。只在 ?debug=1 的调试状态行里显示 ——
+  // 这个数字是"可测量"的：不用去数图上的线，直接读状态行就知道。
+  let tracerDrawn = 0;
+
   // ---------------------------------------------------------------- 画布
   const sceneCv = document.getElementById('scene');
   const hudCv = document.getElementById('hud');
@@ -99,6 +106,19 @@
   }
 
   function rgba(c, a) { return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')'; }
+
+  // ---------------------------------------------------------------- 彩虹线框
+  // 色相按"屏幕横向位置"取，所以同一帧里从左到右就是一道彩虹；
+  // 再叠一点时间流动让它缓慢扫过。
+  // 只用 300 度铺满屏幕：用满 360 的话最左和最右会落在同一色相，接缝会很明显。
+  let huePhase = 0;
+
+  function strokeFor(item, color, o, alpha) {
+    if (!o.rainbow) return rgba(color, alpha);
+    const x = item.sb ? (item.sb.left + item.sb.right) / 2 : item.sx;
+    const hue = ((x / W) * 300 + huePhase) % 360;
+    return 'hsla(' + hue.toFixed(1) + ',100%,62%,' + alpha + ')';
+  }
 
   /** 屏幕像素对齐，1px 线才够锐利 */
   function snap(v) { return Math.round(v) + 0.5; }
@@ -197,6 +217,8 @@
     hctx.clearRect(0, 0, W, H);
 
     const color = hexToRgb(o.color || '#ffffff');
+    // 彩虹色相的时间流动：24 度/秒，约 15 秒走完一圈
+    huePhase = (now / 1000 * 24) % 360;
     const focal = (W / 2) / Math.tan(((o.fov || 90) * DEG) / 2);
     FOCAL = focal;
     const cx = W / 2, cy = H / 2;
@@ -240,7 +262,6 @@
     }
     boxes.sort((p, q) => q.dist - p.dist); // 远的先画
 
-    if (o.grid) drawGrid(sctx, K, cam, focal, cx, cy, color, o);
     if (o.worldBoxes !== false) drawWorldBoxes(sctx, K, boxes, focal, cx, cy, color, o);
 
     // ---- HUD ----
@@ -251,7 +272,7 @@
       onScreen++;
     }
 
-    if (o.lines) drawTracers(hctx, boxes, color);
+    if (o.lines) tracerDrawn = drawTracers(hctx, boxes, color); else tracerDrawn = 0;
     if (o.radar) drawRadar(hctx, K, cam, state.boxes, color, o);
     if (o.weapons) drawCenterReticle(hctx, color, o);
     if (o.offscreen) drawOffscreenArrows(hctx, boxes, cx, cy, color);
@@ -270,55 +291,6 @@
     else if (bg === 'dark') css = '#0d0f13';
     if (document.body.style.background !== css) document.body.style.background = css;
     document.documentElement.style.background = css === 'transparent' ? 'transparent' : css;
-  }
-
-  // ---------------------------------------------------------------- 地面网格
-  function drawGrid(ctx, K, cam, focal, cx, cy, color, o) {
-    const SP = 4;           // 网格间距（米）
-    const R = 64;           // 绘制半径
-    const CHUNK = 16;       // 每段长度，用来做距离分层渐隐
-    const baseX = Math.round(cam.x / SP) * SP;
-    const baseZ = Math.round(cam.z / SP) * SP;
-
-    // 三层透明度，避免出现生硬的边界
-    const bands = [
-      { limit: 26, alpha: 0.20 },
-      { limit: 46, alpha: 0.11 },
-      { limit: 1e9, alpha: 0.05 }
-    ];
-
-    const paths = [[], [], []];
-
-    const push = (ax, ay, az, bx, by, bz) => {
-      if (!projectSegment(K, ax, ay, az, bx, by, bz, focal, cx, cy, segTmp)) return;
-      const mx = (ax + bx) / 2 - cam.x;
-      const mz = (az + bz) / 2 - cam.z;
-      const d = Math.hypot(mx, mz);
-      let band = 2;
-      if (d < bands[0].limit) band = 0;
-      else if (d < bands[1].limit) band = 1;
-      paths[band].push(segTmp[0], segTmp[1], segTmp[2], segTmp[3]);
-    };
-
-    for (let x = baseX - R; x <= baseX + R; x += SP) {
-      for (let z = baseZ - R; z < baseZ + R; z += CHUNK) push(x, 0, z, x, 0, z + CHUNK);
-    }
-    for (let z = baseZ - R; z <= baseZ + R; z += SP) {
-      for (let x = baseX - R; x < baseX + R; x += CHUNK) push(x, 0, z, x + CHUNK, 0, z);
-    }
-
-    ctx.lineWidth = 1;
-    for (let i = 0; i < bands.length; i++) {
-      const arr = paths[i];
-      if (!arr.length) continue;
-      ctx.strokeStyle = rgba(color, bands[i].alpha);
-      ctx.beginPath();
-      for (let k = 0; k < arr.length; k += 4) {
-        ctx.moveTo(arr[k], arr[k + 1]);
-        ctx.lineTo(arr[k + 2], arr[k + 3]);
-      }
-      ctx.stroke();
-    }
   }
 
   // ---------------------------------------------------------------- 3D 线框盒子
@@ -343,10 +315,10 @@
         [0, 4], [1, 5], [2, 6], [3, 7]    // 连接
       ];
 
-      ctx.strokeStyle = rgba(color, alpha);
+      ctx.strokeStyle = strokeFor(item, color, o, alpha);
       ctx.lineWidth = 1;
       if (e > 0) {
-        ctx.shadowColor = rgba(color, 0.85);
+        ctx.shadowColor = strokeFor(item, color, o, 0.85);
         ctx.shadowBlur = 3 + e * 9;
       }
 
@@ -359,17 +331,6 @@
 
       ctx.shadowBlur = 0;
 
-      // 落地参考线（默认关）：竖直投影 + 地面十字，让目标"站在地上"
-      if (o.groundCross && y0 > 0.12) {
-        ctx.strokeStyle = rgba(color, 0.22 * (b.a ?? 1));
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        addSegment(ctx, K, b.x, y0, b.z, b.x, 0, b.z, focal, cx, cy);
-        const r = Math.max(hx, hz) * 1.6;
-        addSegment(ctx, K, b.x - r, 0.01, b.z, b.x + r, 0.01, b.z, focal, cx, cy);
-        addSegment(ctx, K, b.x, 0.01, b.z - r, b.x, 0.01, b.z + r, focal, cx, cy);
-        ctx.stroke();
-      }
     }
   }
 
@@ -423,7 +384,7 @@
     const lw = Math.max(1, o.thickness || 2);
 
     // 1) 细底框
-    ctx.strokeStyle = rgba(color, 0.5 * a);
+    ctx.strokeStyle = strokeFor(item, color, o, 0.5 * a);
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.rect(left, top, bw, bh);
@@ -432,10 +393,10 @@
     // 2) 四角括号（粗一点，这是"透视框"的灵魂）
     const cl = Math.max(6, Math.min(bw, bh) * 0.28);   // 括号臂长
     if (o.glow) {
-      ctx.shadowColor = rgba(color, 0.9);
+      ctx.shadowColor = strokeFor(item, color, o, 0.9);
       ctx.shadowBlur = 4 + (o.glow || 0) * 10;
     }
-    ctx.strokeStyle = rgba(color, 0.95 * a);
+    ctx.strokeStyle = strokeFor(item, color, o, 0.95 * a);
     ctx.lineWidth = lw;
     ctx.lineCap = 'butt';
     ctx.beginPath();
@@ -509,29 +470,39 @@
     const cx = W / 2, cy = H / 2;
     const limit = Math.min(W, H) * 0.45;
 
-    // 只连"离准星最近"的最多 2 个。
-    // 如果连给所有目标，当地面上所有目标都差不多高时，这些线会在视觉上
+    // 只连"离准星最近"的最多 TRACER_MAX 个。
+    // 为什么不连给所有目标：当地面上所有目标都差不多高时，全部连线会在视觉上
     // 连成一条横贯全屏的长线，看起来像渲染 bug。
+    // 从 2 个提到 5 个（用户要求）：仍然是最靠近准星的那几个，所以是"扇形"而不是横线。
+    // 端点取盒子的**顶边中点**，不是盒子中心。
+    // 原因：所有目标都站在地上、相机又是水平的，它们投影到屏幕上的 Y 几乎一样
+    // （60m 处在中心线下方约 7px，20m 处约 22px）。如果连中心，5 条线会重合成
+    // 一条横贯准星的水平线，看起来像渲染 bug —— 这正是当初把它限制成 2 条的原因。
+    // 连顶边就天然有纵向层次：近的盒子高、端点也高，自然形成扇形。
     const candidates = [];
     for (const item of boxes) {
-      if (isNaN(item.sx)) continue;
+      if (isNaN(item.sx) || !item.sb) continue;
       if (item.dist > 75) continue;
       if ((item.b.a ?? 1) < 0.35) continue;
-      const off = Math.hypot(item.sx - cx, item.sy - cy);
+      const ex = (item.sb.left + item.sb.right) / 2;
+      const ey = item.sb.top;
+      const off = Math.hypot(ex - cx, ey - cy);
       if (off < 18 || off > limit) continue;
-      candidates.push({ item, off });
+      candidates.push({ item, off, ex, ey });
     }
     candidates.sort((p, q) => p.off - q.off);
 
     ctx.strokeStyle = rgba(color, 0.22);
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let i = 0; i < Math.min(2, candidates.length); i++) {
-      const item = candidates[i].item;
+    const drawn = Math.min(TRACER_MAX, candidates.length);
+    for (let i = 0; i < drawn; i++) {
+      const c = candidates[i];
       ctx.moveTo(cx, cy);
-      ctx.lineTo(item.sx, item.sy);
+      ctx.lineTo(c.ex, c.ey);
     }
     ctx.stroke();
+    return drawn;
   }
 
   // ---------------------------------------------------------------- 屏外指示
@@ -586,9 +557,10 @@
   function drawCenterReticle(ctx, color, o) {
     const cx = W / 2, cy = H / 2;
 
-    // 假装是"瞄准辅助"的那个圈
+    // 假装是"瞄准辅助"的那个圈。
+    // 之前是 0.10 的透明度，用户反馈"太暗淡，有时候看不清"，提到 0.35。
     const r = Math.min(W, H) * 0.18;
-    ctx.strokeStyle = rgba(color, 0.10);
+    ctx.strokeStyle = rgba(color, 0.35);
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -681,7 +653,7 @@
     lines.push('模式 ' + MODE + '   画布 ' + W + 'x' + H + '   DPR ' + DPR);
     lines.push('拉取 ' + fetchHz.toFixed(0) + 'Hz   模拟 ' + (st.simHz || 0).toFixed(0) + 'Hz   渲染 ' + frameFps.toFixed(0) + 'fps   ' + renderMs.toFixed(2) + 'ms');
     lines.push('相机 yaw ' + (st.cam ? st.cam.yaw.toFixed(1) : '-') + '  pitch ' + (st.cam ? st.cam.pitch.toFixed(1) : '-') + '  FOV ' + (st.opts ? st.opts.fov : '-'));
-    lines.push('目标 ' + onScreen + ' 在屏 / ' + total + ' 总计');
+    lines.push('目标 ' + onScreen + ' 在屏 / ' + total + ' 总计   准星连线 ' + tracerDrawn + ' 条');
     lines.push('热键  Ins 一键隐身 · Home 视角回中     其余开关在设置面板 /tune');
     statusEl.textContent = lines.join('\n');
   }

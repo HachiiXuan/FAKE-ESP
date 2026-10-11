@@ -245,7 +245,14 @@
       row.appendChild(cell);
 
       const decimals = (String(item.step).split('.')[1] || '').length;
-      const show = (v) => { num.textContent = Number(v).toFixed(decimals); };
+      const show = (v) => {
+        // 值为 0 时可以显示成"关闭"之类的文字（例如"视角回正间隔 = 0"其实是关闭）
+        if (item.zeroLabel && Math.abs(Number(v)) < 1e-9) {
+          num.textContent = item.zeroLabel;
+          return;
+        }
+        num.textContent = Number(v).toFixed(decimals);
+      };
       show(input.value);
 
       input.addEventListener('input', () => {

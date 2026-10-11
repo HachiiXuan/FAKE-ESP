@@ -29,9 +29,12 @@ internal sealed class OverlayWindow : Window
 {
     private const double Deg = Math.PI / 180.0;
     private const int Levels = 5;              // 实体透明度档位：0.2 0.4 0.6 0.8 1.0
-    private const int GridBands = 3;           // 地面网格按距离分三层渐隐
 
-    private static readonly double[] GridAlphas = { 0.20, 0.11, 0.05 };
+    // 彩虹线框：色相分档。档位编码成 [色相桶 * Levels + 透明度档]，
+    // 一个桶一次 DrawGeometry —— 逐目标换颜色会把合批彻底打散（每次调用固定开销约 0.4ms），
+    // 分 16 桶之后通常只剩十几次调用。分档数就是"平滑度 vs 调用数"的旋钮。
+    private const int RainbowHues = 16;
+    private const int BoxBands = Levels * RainbowHues;
 
     // ================================================================ 合批缓冲
 
@@ -211,12 +214,13 @@ internal sealed class OverlayWindow : Window
     private readonly Surface _surface;
     private bool _ready;
 
-    private readonly SegBuffer _wire = new(Levels);
-    private readonly SegBuffer _ground = new(Levels);
-    private readonly SegBuffer _outline = new(Levels);
-    private readonly SegBuffer _bracket = new(Levels);
+    /// <summary>准星到目标最多连几条线（取离准星最近的那几个）。要和 web/esp.js 里的 TRACER_MAX 保持一致。</summary>
+    private const int TracerMax = 5;
+
+    private readonly SegBuffer _wire = new(BoxBands);
+    private readonly SegBuffer _outline = new(BoxBands);
+    private readonly SegBuffer _bracket = new(BoxBands);
     private readonly SegBuffer _tracer = new(Levels);
-    private readonly SegBuffer _grid = new(GridBands);
     private readonly SegBuffer _radarLines = new(1);
 
     private readonly RectBuffer _hpTrack = new(Levels);
@@ -408,6 +412,7 @@ internal sealed class OverlayWindow : Window
         if (!opt.Enabled) return;   // Ins 一键隐身
 
         var now = Environment.TickCount64;
+        _huePhase = now * 0.024;    // 彩虹色相的时间流动：24 度/秒，约 15 秒走完一圈
 
         _world.GetCamera(out var camX, out var camY, out var camZ, out var yaw, out var pitch, out var fov);
 
@@ -454,11 +459,9 @@ internal sealed class OverlayWindow : Window
 
         // ---- 清空合批缓冲 ----
         _wire.Clear();
-        _ground.Clear();
         _outline.Clear();
         _bracket.Clear();
         _tracer.Clear();
-        _grid.Clear();
         _radarLines.Clear();
         _hpTrack.Clear();
         _hpFill.Clear();
@@ -471,13 +474,13 @@ internal sealed class OverlayWindow : Window
         AccumulateHud(opt);
         if (opt.Lines) AccumulateTracers(w, h);
         if (opt.Offscreen) AccumulateArrows(w, h);
-        if (opt.Grid) AccumulateGrid(camX, camZ);
         if (opt.Radar) AccumulateRadar(views, camX, camZ, yaw, w, h, opt);
 
         // ---- 输出（每一类通常只剩 1~2 次调用）----
-        _wire.Flush(dc, band => PenFor(color, 1, AlphaOf(band)));
-        _ground.Flush(dc, band => PenFor(color, 1, 0.22 * AlphaOf(band)));
-        _outline.Flush(dc, band => PenFor(color, 1, 0.5 * AlphaOf(band)));
+        // 盒子类的三样（3D 线框 / 2D 框线 / 四角括号）支持彩虹渐变，其余元素用基础色。
+        var rainbow = opt.Rainbow;
+        _wire.Flush(dc, band => PenForBoxBand(color, rainbow, band, 1, 1.0));
+        _outline.Flush(dc, band => PenForBoxBand(color, rainbow, band, 1, 0.5));
         _tracer.Flush(dc, band => PenFor(color, 1, 0.20 * AlphaOf(band)));
         _hpTrack.Flush(dc, band => BrushFor(Colors.Black, 0.45 * AlphaOf(band)));
         _hpFill.Flush(dc, band => BrushFor(color, 0.92 * AlphaOf(band)));
@@ -485,7 +488,6 @@ internal sealed class OverlayWindow : Window
         _arrows.Flush(dc, band => BrushFor(color, 0.42 * AlphaOf(band)));
         _radarDots.Flush(dc, band => BrushFor(color, 0.8 * AlphaOf(band)));
 
-        _grid.Flush(dc, band => PenFor(color, 1, GridAlphas[band]));
         _radarLines.Flush(dc, band => PenFor(color, 1, 0.16));
 
         // 四角括号 + 廉价发光：再描一根更粗更淡的笔，成本只多一次调用
@@ -493,9 +495,9 @@ internal sealed class OverlayWindow : Window
         var thickness = Math.Max(1, opt.Thickness);
         _bracket.Flush(
             dc,
-            band => PenFor(color, thickness, 0.95 * AlphaOf(band)),
+            band => PenForBoxBand(color, rainbow, band, thickness, 0.95),
             glow > 0.02
-                ? band => PenFor(color, thickness * 3.2, 0.10 * glow * AlphaOf(band))
+                ? band => PenForBoxBand(color, rainbow, band, thickness * 3.2, 0.10 * glow)
                 : null);
 
         // ---- 文字与零散元素 ----
@@ -507,6 +509,93 @@ internal sealed class OverlayWindow : Window
     private static int BandOf(double alpha) => Math.Clamp((int)Math.Ceiling(alpha * Levels) - 1, 0, Levels - 1);
 
     private static double AlphaOf(int band) => (band + 1) / (double)Levels;
+
+    // ================================================================ 彩虹线框
+
+    /// <summary>色相的时间流动量（度）。每帧在 Draw 里更新。</summary>
+    private double _huePhase;
+
+    /// <summary>
+    /// 按屏幕横向位置给一个色相（度）。只用 300 度而不是 360：
+    /// 铺满一圈的话屏幕最左和最右会落在同一个色相上，形成一道"接缝"。
+    /// </summary>
+    private double HueFor(double screenX)
+    {
+        var p = _cx > 1 ? screenX / (_cx * 2) : 0.5;   // 0..1 横跨屏幕
+        return p * 300.0 + _huePhase;
+    }
+
+    /// <summary>把 [色相桶, 透明度档] 编码成一个档位号。彩虹关闭时全部落在色相桶 0。</summary>
+    private static int BoxBand(bool rainbow, double alpha, double hueDeg)
+    {
+        var a = BandOf(alpha);
+        if (!rainbow) return a;
+
+        var h = (int)((((hueDeg % 360) + 360) % 360) / (360.0 / RainbowHues));
+        if (h < 0) h = 0;
+        else if (h >= RainbowHues) h = RainbowHues - 1;
+        return h * Levels + a;
+    }
+
+    /// <summary>盒子类图元（3D 线框 / 2D 框线 / 四角括号）的画笔，支持彩虹。</summary>
+    private Pen PenForBoxBand(Color baseColor, bool rainbow, int band, double thickness, double alphaScale)
+    {
+        var alpha = alphaScale * AlphaOf(band % Levels);
+        if (!rainbow) return PenFor(baseColor, thickness, alpha);
+
+        var hue = band / Levels * (360.0 / RainbowHues);
+        return PenForHue(hue, thickness, alpha);
+    }
+
+    private Pen PenForHue(double hueDeg, double thickness, double alpha)
+    {
+        var band = BandOf(alpha);
+        var hueKey = (int)Math.Round((((hueDeg % 360) + 360) % 360) / (360.0 / RainbowHues));
+        if (hueKey >= RainbowHues) hueKey = 0;
+
+        // 高位加个标记，免得和 PennyFor 的键（RGB 24 位）撞上
+        var key = unchecked(0x1000000 | (hueKey << 8) | band);
+        key = unchecked(key * 31 + (int)Math.Round(thickness * 4));
+
+        if (_pens.TryGetValue(key, out var pen)) return pen;
+        if (_pens.Count > 400) _pens.Clear();
+
+        var c = ColorFromHue(hueDeg);
+        var brush = new SolidColorBrush(Color.FromArgb((byte)(AlphaOf(band) * 255), c.R, c.G, c.B));
+        brush.Freeze();
+        pen = new Pen(brush, thickness);
+        pen.Freeze();
+        _pens[key] = pen;
+        return pen;
+    }
+
+    /// <summary>HSL 里固定饱和度 1、亮度 0.62，按色相取色。彩虹用。</summary>
+    private static Color ColorFromHue(double hueDeg)
+    {
+        const double s = 1.0;
+        const double l = 0.62;
+
+        var h = (((hueDeg % 360) + 360) % 360) / 60.0;
+        var c = (1 - Math.Abs(2 * l - 1)) * s;
+        var x = c * (1 - Math.Abs(h % 2 - 1));
+        var m = l - c / 2;
+
+        double r, g, b;
+        switch ((int)h)
+        {
+            case 0: r = c; g = x; b = 0; break;
+            case 1: r = x; g = c; b = 0; break;
+            case 2: r = 0; g = c; b = x; break;
+            case 3: r = 0; g = x; b = c; break;
+            case 4: r = x; g = 0; b = c; break;
+            default: r = c; g = 0; b = x; break;
+        }
+
+        return Color.FromRgb(
+            (byte)Math.Clamp(Math.Round((r + m) * 255), 0, 255),
+            (byte)Math.Clamp(Math.Round((g + m) * 255), 0, 255),
+            (byte)Math.Clamp(Math.Round((b + m) * 255), 0, 255));
+    }
 
     /// <summary>3D 盒子的 8 个角投到屏幕求包围盒。只用相机前方的角，背后的角会除以接近 0 的深度炸成全屏。</summary>
     private ScreenBox? ComputeScreenBox(EntityView v, double w, double h)
@@ -580,7 +669,7 @@ internal sealed class OverlayWindow : Window
             var y0 = v.Y - hy; var y1 = v.Y + hy;
             var z0 = v.Z - hz; var z1 = v.Z + hz;
 
-            var band = BandOf(0.55 * v.Alpha);
+            var band = BoxBand(opt.Rainbow, 0.55 * v.Alpha, HueFor(item.ScreenX));
 
             AddSeg(_wire, band, x0, y0, z0, x1, y0, z0);
             AddSeg(_wire, band, x1, y0, z0, x1, y1, z0);
@@ -594,16 +683,6 @@ internal sealed class OverlayWindow : Window
             AddSeg(_wire, band, x1, y0, z0, x1, y0, z1);
             AddSeg(_wire, band, x1, y1, z0, x1, y1, z1);
             AddSeg(_wire, band, x0, y1, z0, x0, y1, z1);
-
-            // 落地参考线（默认关）：竖直投影 + 地面十字
-            if (opt.GroundCross && y0 > 0.12)
-            {
-                var gband = BandOf(0.22 * v.Alpha);
-                AddSeg(_ground, gband, v.X, y0, v.Z, v.X, 0, v.Z);
-                var r = Math.Max(hx, hz) * 1.6;
-                AddSeg(_ground, gband, v.X - r, 0.01, v.Z, v.X + r, 0.01, v.Z);
-                AddSeg(_ground, gband, v.X, 0.01, v.Z - r, v.X, 0.01, v.Z + r);
-            }
         }
     }
 
@@ -626,15 +705,19 @@ internal sealed class OverlayWindow : Window
             var bw = Math.Max(2, right - left);
             var bh = Math.Max(2, bottom - top);
 
+            // 彩虹线框的色相按"屏幕横向位置"取，所以同一帧里从左到右是一道渐变；
+            // 再叠一点时间流动，让它缓慢扫过（见 HueFor / _huePhase）。
+            var hue = HueFor((box.Left + box.Right) / 2);
+
             // 1) 细底框（水平/垂直四段，一起塞进线段缓冲）
-            var oband = BandOf(0.5 * a);
+            var oband = BoxBand(opt.Rainbow, 0.5 * a, hue);
             _outline.Add(oband, left, top, right, top);
             _outline.Add(oband, right, top, right, bottom);
             _outline.Add(oband, right, bottom, left, bottom);
             _outline.Add(oband, left, bottom, left, top);
 
             // 2) 四角括号（透视框的灵魂）
-            var bband = BandOf(0.95 * a);
+            var bband = BoxBand(opt.Rainbow, 0.95 * a, hue);
             var cl = Math.Max(6, Math.Min(bw, bh) * 0.28);
             _bracket.Add(bband, left, top + cl, left, top);
             _bracket.Add(bband, left, top, left + cl, top);
@@ -677,8 +760,9 @@ internal sealed class OverlayWindow : Window
 
     private void AccumulateTracers(double w, double h)
     {
-        // 只连"离准星最近"的最多 2 个。全连的话，地面目标高度相近时
+        // 只连"离准星最近"的最多 TracerMax 个。全连的话，地面目标高度相近时
         // 这些线会在视觉上连成一条横贯全屏的长线，看起来像渲染 bug。
+        // 从 2 个提到 5 个（用户要求）：仍然取最靠近准星的那几个，所以是"扇形"而不是横线。
         var limit = Math.Min(w, h) * 0.45;
 
         _scratch.Clear();
@@ -687,26 +771,39 @@ internal sealed class OverlayWindow : Window
             if (double.IsNaN(item.ScreenX)) continue;
             if (item.Dist > 75) continue;
             if (item.V.Alpha < 0.35) continue;
+            if (item.Box == null) continue;
 
-            var dx = item.ScreenX - _cx;
-            var dy = item.ScreenY - _cy;
+            // 端点取盒子的**顶边中点**，不是盒子中心。
+            // 所有目标都站在地上、相机又水平时，它们投影到屏幕的 Y 几乎一样，
+            // 连中心的话 5 条线会重合成一条横贯准星的水平线（看起来像渲染 bug）。
+            // 连顶边就天然有纵向层次：近的盒子高、端点也高，自然形成扇形。
+            var box = item.Box.Value;
+            var ex = (box.Left + box.Right) / 2;
+            var ey = box.Top;
+
+            var dx = ex - _cx;
+            var dy = ey - _cy;
             var off = Math.Sqrt(dx * dx + dy * dy);
             if (off < 18 || off > limit) continue;
             _scratch.Add(item);
         }
 
         _scratch.Sort((a, b) => OffsetOf(a).CompareTo(OffsetOf(b)));
-        var count = Math.Min(2, _scratch.Count);
+        var count = Math.Min(TracerMax, _scratch.Count);
         for (var i = 0; i < count; i++)
         {
             var item = _scratch[i];
-            _tracer.Add(BandOf(item.V.Alpha), _cx, _cy, item.ScreenX, item.ScreenY);
+            var box = item.Box!.Value;
+            var ex = (box.Left + box.Right) / 2;
+            _tracer.Add(BandOf(item.V.Alpha), _cx, _cy, ex, box.Top);
         }
 
         double OffsetOf(Item item)
         {
-            var dx = item.ScreenX - _cx;
-            var dy = item.ScreenY - _cy;
+            if (item.Box == null) return double.MaxValue;
+            var box = item.Box.Value;
+            var dx = (box.Left + box.Right) / 2 - _cx;
+            var dy = box.Top - _cy;
             return Math.Sqrt(dx * dx + dy * dy);
         }
     }
@@ -757,40 +854,6 @@ internal sealed class OverlayWindow : Window
 
     private static double RotateY(double x, double y, double ang, double ax, double ay) =>
         ay + x * Math.Sin(ang) + y * Math.Cos(ang);
-
-    // ---------------------------------------------------------------- 地面网格
-
-    private void AccumulateGrid(double camX, double camZ)
-    {
-        const double spacing = 6.0;
-        const double radius = 42.0;
-        const double chunk = 14.0;
-
-        var baseX = Math.Round(camX / spacing) * spacing;
-        var baseZ = Math.Round(camZ / spacing) * spacing;
-
-        for (var x = baseX - radius; x <= baseX + radius; x += spacing)
-        {
-            for (var z = baseZ - radius; z < baseZ + radius; z += chunk) AddGridSegment(x, 0, z, x, 0, z + chunk, camX, camZ);
-        }
-
-        for (var z = baseZ - radius; z <= baseZ + radius; z += spacing)
-        {
-            for (var x = baseX - radius; x < baseX + radius; x += chunk) AddGridSegment(x, 0, z, x + chunk, 0, z, camX, camZ);
-        }
-    }
-
-    private void AddGridSegment(double ax, double ay, double az, double bx, double by, double bz, double camX, double camZ)
-    {
-        if (!Projection.ProjectSegment(_k, ax, ay, az, bx, by, bz, _focal, _cx, _cy,
-                out var x1, out var y1, out var x2, out var y2)) return;
-
-        var mx = (ax + bx) * 0.5 - camX;
-        var mz = (az + bz) * 0.5 - camZ;
-        var d = Math.Sqrt(mx * mx + mz * mz);
-
-        _grid.Add(d < 18 ? 0 : (d < 31 ? 1 : 2), x1, y1, x2, y2);
-    }
 
     // ---------------------------------------------------------------- 文字
 
@@ -939,8 +1002,9 @@ internal sealed class OverlayWindow : Window
     {
         var cx = w / 2;
         var cy = h / 2;
+        // 之前是 0.10 的透明度，用户反馈"太暗淡，有时候看不清"，提到 0.35
         var r = Math.Min(w, h) * 0.18;
-        dc.DrawEllipse(null, PenFor(color, 1, 0.10), new Point(cx, cy), r, r);
+        dc.DrawEllipse(null, PenFor(color, 1, 0.35), new Point(cx, cy), r, r);
 
         var geometry = new StreamGeometry();
         using (var ctx = geometry.Open())

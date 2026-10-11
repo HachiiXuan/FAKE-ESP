@@ -36,6 +36,14 @@ internal sealed class World
         public bool Jitter = true;         // 高频抖动（模拟真实 ESP 的数据刷新）
         public bool Breathing = false;     // 相机轻微呼吸摆动（默认关，避免掩盖输入问题）
 
+        // ---- 视角稳定 ----
+        // 假相机的朝向和游戏真实朝向之间的误差**无法消除**（我们读不到游戏的世界，
+        // 也不会去读），所以只能"不让它累积"。下面这几项都是干这个的。
+        public bool LockPitch = false;         // 锁定垂直轴：pitch 恒为 0，只留左右移动
+        public double RecenterInterval = 0;    // 视角回正间隔（秒），0 = 关闭
+        public double SoftRecenter = 0;        // 水平软回正速度（度/秒，持续生效），0 = 关闭
+        public int MinInView = 0;              // 视野内最少目标数，0 = 关闭
+
         // ---- 画面元素 ----
         public bool WorldBoxes = false;    // 3D 线框盒子：转视角能看出体积
         public bool Dist = true;           // 距离数字
@@ -45,8 +53,6 @@ internal sealed class World
         public bool Names = false;         // 目标假名字
         public bool HeadMarker = true;      // 头顶小标记
         public bool Offscreen = false;     // 屏外方向箭头
-        public bool GroundCross = false;   // 落地参考线
-        public bool Grid = false;          // 地面网格
         public bool Radar = false;         // 右下角雷达
         public bool Weapons = true;        // 中心准星 / FOV 圈
 
@@ -54,6 +60,7 @@ internal sealed class World
         public int Thickness = 2;          // 框线宽
         public double Glow = 0;            // 发光强度
         public string Color = "#ffffff";   // 框颜色（默认白色）
+        public bool Rainbow = false;       // 彩虹线框：框线/括号/3D 线框按屏幕位置渐变
         public double Fov = 120;           // 水平视场角（对齐游戏里的 FOV 设置）
         public double Sens = 0.1;          // 每个鼠标原始计数转多少度
         public double MoveSpeed = 6.0;     // WASD 速度 m/s
@@ -69,6 +76,10 @@ internal sealed class World
             sb.Append(",\"maxDist\":").Append(Num(MaxDist));
             sb.Append(",\"jitter\":").Append(B(Jitter));
             sb.Append(",\"breathing\":").Append(B(Breathing));
+            sb.Append(",\"lockPitch\":").Append(B(LockPitch));
+            sb.Append(",\"recenterInterval\":").Append(Num(RecenterInterval));
+            sb.Append(",\"softRecenter\":").Append(Num(SoftRecenter));
+            sb.Append(",\"minInView\":").Append(MinInView);
 
             sb.Append(",\"worldBoxes\":").Append(B(WorldBoxes));
             sb.Append(",\"dist\":").Append(B(Dist));
@@ -78,14 +89,13 @@ internal sealed class World
             sb.Append(",\"names\":").Append(B(Names));
             sb.Append(",\"headMarker\":").Append(B(HeadMarker));
             sb.Append(",\"offscreen\":").Append(B(Offscreen));
-            sb.Append(",\"groundCross\":").Append(B(GroundCross));
-            sb.Append(",\"grid\":").Append(B(Grid));
             sb.Append(",\"radar\":").Append(B(Radar));
             sb.Append(",\"weapons\":").Append(B(Weapons));
 
             sb.Append(",\"thickness\":").Append(Thickness);
             sb.Append(",\"glow\":").Append(Num(Glow));
             sb.Append(",\"color\":\"").Append(JsonEscape(Color)).Append('"');
+            sb.Append(",\"rainbow\":").Append(B(Rainbow));
             sb.Append(",\"fov\":").Append(Num(Fov));
             sb.Append(",\"sens\":").Append(Num(Sens, 5));
             sb.Append(",\"moveSpeed\":").Append(Num(MoveSpeed));
@@ -125,6 +135,8 @@ internal sealed class World
         public double Life;
         public double JitterPhase;
         public double HopPhase;
+        /// <summary>刚被"视野内最少目标数"搬过之后，这段时间内不再搬，防止闪来闪去。</summary>
+        public double ViewCooldown;
     }
 
     /// <summary>给同进程的覆盖窗用的只读快照。</summary>
@@ -171,11 +183,20 @@ internal sealed class World
     private double _idleYaw;
     private double _idlePitch;
     private double _velY;              // 垂直速度（跳跃用）
-    private int _nextNameIndex;
+    private double _recenterTimer;     // 距离下一次定时回正还有多久
+    private double _recenterT;         // 当前这段回正还剩多久
+    private double _recenterFrom;      // 这段回正开始时要从 pitch 里减掉多少
+    private double _recenterDone;      // 这段回正已经减掉了多少
+    private double _viewTimer;         // "视野内最少目标数"的检查节流
+    private int _viewCursor;           // 轮转起点，避免总是搬同几个目标
     private int _nextId = 1;
 
     private const double JumpSpeed = 5.2;    // 起跳初速度 m/s
     private const double Gravity = 14.0;     // 重力 m/s²（偏大一点，手感更干脆）
+    // 一次定时回正持续多久。3 秒是权衡出来的：
+    // 120 度的偏差摊到 3 秒，中段最快约 60 度/秒（≈960 像素/秒），看着像一次平稳的转头；
+    // 1.2 秒的话就是 1926 像素在一秒出头刷过去，会"唰"一下。
+    private const double RecenterTweenSeconds = 3.0;
 
     public const double EyeHeight = 1.70;
     public const double NearPlane = 0.05;
@@ -221,7 +242,8 @@ internal sealed class World
         lock (_gate)
         {
             _yaw += dx * sens;
-            _pitch -= dy * sens;
+            // 锁定垂直轴时完全忽略纵向位移（俯仰在 UpdateCamera 里被强制拉平）
+            if (!Opt.LockPitch) _pitch -= dy * sens;
 
             if (_yaw > 360) _yaw -= 360;
             if (_yaw < -360) _yaw += 360;
@@ -315,6 +337,10 @@ internal sealed class World
         Opt.MoveSpeed = d.MoveSpeed;
         Opt.Jitter = d.Jitter;
         Opt.Breathing = d.Breathing;
+        Opt.LockPitch = d.LockPitch;
+        Opt.RecenterInterval = d.RecenterInterval;
+        Opt.SoftRecenter = d.SoftRecenter;
+        Opt.MinInView = d.MinInView;
 
         Opt.WorldBoxes = d.WorldBoxes;
         Opt.Dist = d.Dist;
@@ -324,14 +350,13 @@ internal sealed class World
         Opt.Names = d.Names;
         Opt.HeadMarker = d.HeadMarker;
         Opt.Offscreen = d.Offscreen;
-        Opt.GroundCross = d.GroundCross;
-        Opt.Grid = d.Grid;
         Opt.Radar = d.Radar;
         Opt.Weapons = d.Weapons;
 
         Opt.Thickness = d.Thickness;
         Opt.Glow = d.Glow;
         Opt.Color = d.Color;
+        Opt.Rainbow = d.Rainbow;
         Opt.Fov = d.Fov;
         Opt.Sens = d.Sens;
         Opt.MoveSpeed = d.MoveSpeed;
@@ -353,8 +378,8 @@ internal sealed class World
         {
             case "full":
                 Opt.WorldBoxes = true; Opt.Dist = true; Opt.Health = true; Opt.Lines = true;
-                Opt.Names = true; Opt.HeadMarker = true; Opt.Offscreen = true; Opt.GroundCross = true;
-                Opt.Grid = true; Opt.Radar = true; Opt.Weapons = true;
+                Opt.Names = true; Opt.HeadMarker = true; Opt.Offscreen = true;
+                Opt.Radar = true; Opt.Weapons = true;
                 break;
             case "default":
             case "minimal":
@@ -434,18 +459,71 @@ internal sealed class World
                 _velY = 0;
             }
 
+            // 锁定垂直轴：把俯仰强制拉平。
+            // 放在这里而不是 OnMouseMoved 里，是为了"中途打开这个开关"时也能立刻生效
+            // （否则它会僵在打开那一瞬间的角度上）。
+            if (Opt.LockPitch) _pitch = 0;
+
             // 轻微"呼吸感"：让画面不完全死住。
             // 默认关闭 —— 它会掩盖"鼠标输入到底通没通"这个关键判断，
             // 而且会让人觉得视角"不跟手"。
+            // 锁了垂直轴时连俯仰摆动也不能有，否则框还是会上下来回晃。
             if (Opt.Breathing)
             {
-                _idlePitch = Math.Sin(_time * 0.7) * 0.22;
                 _idleYaw = Math.Sin(_time * 0.31) * 0.35;
+                _idlePitch = Opt.LockPitch ? 0 : Math.Sin(_time * 0.7) * 0.22;
             }
             else
             {
                 _idlePitch = 0;
                 _idleYaw = 0;
+            }
+
+            // ---------------- 俯仰回正 ----------------
+            // ★ 只回正**垂直**方向（pitch），水平方向（yaw）故意不管。
+            //
+            // 为什么水平不需要回正：目标本来就是围绕**当前 yaw** 生成和重生的
+            // （RespawnAway / RespawnInView 都用 _yaw 当中心），所以 yaw 漂到哪里，
+            // 目标簇就跟到哪里 —— 水平方向根本不会把框"漂丢"。
+            //
+            // 为什么垂直必须回正：目标是站在地上的（Y≈0.9m），相机眼高 1.7m。
+            // pitch 一旦歪了，框就整体沉到屏幕外或者飘到屏幕上方，而且**没有任何机制
+            // 会把它拉回来** —— 这就是"框回不到水平画面、得一直按 Home"的真正原因。
+            //
+            // ★ 一定要平滑。一次性归零会让所有框纵向瞬移 |pitch|/垂直FOV*屏高 像素，
+            //   等于整屏闪一下。这里用 smoothstep（两端导数为 0）：起步和收尾都察觉不到。
+            //   而且它是**按差值递减**而不是给 pitch 赋值，所以回正期间继续转鼠标依然有效。
+            if (Opt.SoftRecenter > 0)
+            {
+                // 持续软回正：按设定速度（度/秒）等速把俯仰往 0 拉
+                var step = Opt.SoftRecenter * dt;
+                if (Math.Abs(_pitch) <= step) _pitch = 0;
+                else _pitch -= Math.Sign(_pitch) * step;
+            }
+
+            if (Opt.RecenterInterval > 0 && _recenterT <= 0)
+            {
+                _recenterTimer += dt;
+                if (_recenterTimer >= Opt.RecenterInterval)
+                {
+                    _recenterTimer = 0;
+                    _recenterT = RecenterTweenSeconds;
+                    _recenterFrom = _pitch;   // 这一段要从 pitch 里减掉这么多
+                    _recenterDone = 0;
+                }
+            }
+
+            if (_recenterT > 0)
+            {
+                _recenterT -= dt;
+
+                var p = Math.Clamp(1 - Math.Max(_recenterT, 0) / RecenterTweenSeconds, 0, 1);
+                var ease = p * p * (3 - 2 * p);          // smoothstep
+                var want = _recenterFrom * ease;
+                _pitch -= want - _recenterDone;
+                _recenterDone = want;
+
+                if (_recenterT <= 0) _recenterDone = 0;  // 这一段结束，清零待命
             }
 
             _eyeY = Math.Clamp(_eyeY, 0.2, 60);
@@ -482,9 +560,6 @@ internal sealed class World
             }
         }
     }
-
-    private static readonly string[] NamePrefixes = { "Player", "Scav", "Loot" };
-    private static readonly string[] PlayerTags = { "Ttv", "xD", "Pro", "Noob", "Camper", "Sweat", "Bot", "Afk" };
 
     private Entity SpawnNew()
     {
@@ -550,19 +625,11 @@ internal sealed class World
 
     private string BuildName(Kind kind)
     {
-        _nextNameIndex++;
-        switch (kind)
-        {
-            case Kind.Player:
-                var tag = PlayerTags[_rng.Next(PlayerTags.Length)];
-                return _rng.NextDouble() < 0.45
-                    ? tag + "_" + NamePrefixes[0] + _rng.Next(10, 99)
-                    : NamePrefixes[0] + "_" + _rng.Next(100, 999);
-            case Kind.Scav:
-                return NamePrefixes[1] + "_" + _rng.Next(10, 99);
-            default:
-                return NamePrefixes[2] + "_" + _nextNameIndex.ToString(CultureInfo.InvariantCulture);
-        }
+        // 名字统一成 Player + 随机数字（用户要求）。
+        // 之前按类别和随机前缀生成 Scav_/Loot_/Ttv_ 之类的花样名字，现在不需要了。
+        // kind 参数保留是为了以后可能按类别区分名字时不用改调用点。
+        _ = kind;
+        return "Player_" + _rng.Next(100, 999).ToString(CultureInfo.InvariantCulture);
     }
 
     private void UpdateEntities(double dt)
@@ -593,6 +660,7 @@ internal sealed class World
                 // 漂移：缓慢随机游走 + 温和地留在相机附近，这样不会走丢
                 e.Phase += dt;
                 e.HopPhase += dt * 2.4;
+                if (e.ViewCooldown > 0) e.ViewCooldown -= dt;
 
                 e.X += e.Vx * dt;
                 e.Z += e.Vz * dt;
@@ -636,6 +704,10 @@ internal sealed class World
                 }
             }
 
+            // "视野内最少目标数"：把跑到视野外的目标搬回前方。
+            // 玩家一直按 W 前进时，世界固定的目标会全部落到身后 —— 这个机制保证前方永远有东西。
+            MaintainViewPopulation(dt);
+
             // 目标偶尔"被击杀"淡出再换个地方重生，让画面看起来是活的。
             // 注意：这不是"击杀播报"功能（那个按需求已删除），这里没有任何文字，
             // 只是让框偶尔消失/出现。
@@ -659,7 +731,8 @@ internal sealed class World
         }
     }
 
-    private Entity RespawnAway(Entity e)
+    /// <summary>重生时要重置的公共部分（换一个新身份、满血、清死亡状态）。</summary>
+    private void ResetEntityForRespawn(Entity e)
     {
         // 换一个全新 id：从渲染端看就是"这个人没了，另一个人出生了"
         e.Id = _nextId++;
@@ -673,14 +746,119 @@ internal sealed class World
         e.HopPhase = _rng.NextDouble() * Math.PI * 2;
         e.Vx = (_rng.NextDouble() - 0.5) * 3.2;
         e.Vz = (_rng.NextDouble() - 0.5) * 3.2;
+        e.Y = e.Sy * 0.5;      // 先贴地，下一帧模拟会继续维护
+        e.Name = BuildName(e.Kind);
+    }
+
+    private Entity RespawnAway(Entity e)
+    {
+        ResetEntityForRespawn(e);
 
         var azimuth = _yaw * Math.PI / 180.0 + (_rng.NextDouble() - 0.5) * (230.0 * Math.PI / 180.0);
         var nearest = Math.Max(12.0, Opt.MinDist + 3.0);
         var dist = nearest + Math.Pow(_rng.NextDouble(), 1.8) * Math.Max(4, Opt.MaxDist - nearest);
         e.X = _eyeX + Math.Sin(azimuth) * dist;
         e.Z = _eyeZ + Math.Cos(azimuth) * dist;
-        e.Name = BuildName(e.Kind);
+        e.ViewCooldown = 0;
         return e;
+    }
+
+    /// <summary>
+    /// 把目标搬到"当前视野内、且接近最远距离"的位置。
+    ///
+    /// 特意放在最远距离而不是贴脸：它先是一个小框，再慢慢变大靠近 ——
+    /// 看起来像"从远处走进视野"，而不是"啪一下糊在脸上"。
+    /// </summary>
+    private Entity RespawnInView(Entity e)
+    {
+        ResetEntityForRespawn(e);
+
+        // 只用水平视场角的 80%，别贴着屏幕两侧
+        var halfSpan = Math.Clamp(Opt.Fov, 30, 150) * 0.5 * 0.8;
+        var azimuth = (_yaw + (_rng.NextDouble() - 0.5) * 2 * halfSpan) * Math.PI / 180.0;
+
+        // 0.45~1.0 倍最远距离。
+        // 都在远处（所以绝不会"贴脸出现"），但**不要写死成一个距离** ——
+        // 写死的话，一次大转身把多个目标同时搬回来时，屏幕上会出现
+        // "一排一模一样的远距离小框"（截图里亲眼见过）。
+        // 拉开层次之后，近的近、远的远，看着才像一个正常的人群分布。
+        var dist = Opt.MaxDist * (0.45 + _rng.NextDouble() * 0.55);
+
+        e.X = _eyeX + Math.Sin(azimuth) * dist;
+        e.Z = _eyeZ + Math.Cos(azimuth) * dist;
+        e.ViewCooldown = 1.5;
+        return e;
+    }
+
+    /// <summary>目标现在算不算"在玩家视野里"。判定条件要和渲染端的剔除条件保持一致。</summary>
+    private bool IsInView(Entity e, double fx, double fz, double rx, double rz, double tanHalfFov)
+    {
+        var dx = e.X - _eyeX;
+        var dz = e.Z - _eyeZ;
+
+        var forward = dx * fx + dz * fz;
+        if (forward <= 1.0) return false;                     // 在侧面或背后
+
+        var lateral = Math.Abs(dx * rx + dz * rz);
+        if (lateral > forward * tanHalfFov) return false;     // 水平方向出了视场角
+
+        var dist = Math.Sqrt(dx * dx + dz * dz);
+        if (dist > Opt.MaxDist * 1.25) return false;          // 太远（渲染端本来也不画）
+        if (dist < Math.Max(3.0, Opt.MinDist)) return false;  // 太近被剔除，不算"看得见"
+
+        return true;
+    }
+
+    /// <summary>
+    /// 保证视野里至少有 Opt.MinInView 个目标。
+    ///
+    /// 解决的问题：目标是**世界固定**的，玩家一直按 W 往前跑，它们就全落到身后了，
+    /// 前方越来越空。这里把视野外的目标搬回前方。
+    ///
+    /// 为什么不干脆让世界跟着玩家走：那样就完全没有视差了，横移时框纹丝不动，
+    /// 看起来像贴在屏幕上，一眼就假。所以只搬"已经跑出视野"的那些。
+    /// </summary>
+    private void MaintainViewPopulation(double dt)
+    {
+        if (Opt.MinInView <= 0) return;
+
+        // 每 0.2 秒检查一次就够；每帧都搬会很神经质
+        _viewTimer -= dt;
+        if (_viewTimer > 0) return;
+        _viewTimer = 0.2;
+
+        var yawRad = _yaw * Math.PI / 180.0;
+        var fx = Math.Sin(yawRad);
+        var fz = Math.Cos(yawRad);
+        var rx = Math.Cos(yawRad);
+        var rz = -Math.Sin(yawRad);
+        var tanHalf = Math.Tan(Math.Clamp(Opt.Fov, 30, 150) * 0.5 * Math.PI / 180.0);
+
+        var visible = 0;
+        for (var i = 0; i < _entities.Count; i++)
+        {
+            if (IsInView(_entities[i], fx, fz, rx, rz, tanHalf)) visible++;
+        }
+
+        var need = Opt.MinInView - visible;
+        if (need <= 0) return;
+
+        // 从轮转位置开始找，避免每次都搬同几个（否则其余目标会永远待在视野外）
+        var n = _entities.Count;
+        for (var k = 0; k < n && need > 0; k++)
+        {
+            var i = (_viewCursor + k) % n;
+            var e = _entities[i];
+
+            if (e.Dying) continue;
+            if (e.ViewCooldown > 0) continue;
+            if (IsInView(e, fx, fz, rx, rz, tanHalf)) continue;
+
+            _entities[i] = RespawnInView(e);
+            need--;
+        }
+
+        _viewCursor = n > 0 ? (_viewCursor + 1) % n : 0;
     }
 
     public EntityView[] SnapshotEntities()
@@ -786,8 +964,27 @@ internal sealed class World
             return false;
         }
 
+        if (TryBool("rainbow", out var rainbow)) { Opt.Rainbow = rainbow; applied.Add("rainbow"); }
         if (TryNum("fov", out var fov)) { Opt.Fov = Math.Clamp(fov, 30, 150); applied.Add("fov"); }
         if (TryNum("sens", out var sens)) { Opt.Sens = Math.Clamp(sens, 0.0005, 0.5); applied.Add("sens"); }
+
+        if (TryBool("lockPitch", out var lockPitch)) { Opt.LockPitch = lockPitch; applied.Add("lockPitch"); }
+        if (TryNum("recenterInterval", out var recenterInterval))
+        {
+            Opt.RecenterInterval = Math.Clamp(recenterInterval, 0, 60);
+            _recenterTimer = 0;
+            applied.Add("recenterInterval");
+        }
+        if (TryNum("softRecenter", out var softRecenter))
+        {
+            Opt.SoftRecenter = Math.Clamp(softRecenter, 0, 60);
+            applied.Add("softRecenter");
+        }
+        if (TryNum("minInView", out var minInView))
+        {
+            Opt.MinInView = (int)Math.Round(Math.Clamp(minInView, 0, 20));
+            applied.Add("minInView");
+        }
         if (TryNum("count", out var count)) { SetCount((int)count); applied.Add("count"); }
         if (TryNum("minDist", out var minDist)) { Opt.MinDist = Math.Clamp(minDist, 0, 100); applied.Add("minDist"); }
         if (TryNum("maxDist", out var maxDist)) { Opt.MaxDist = Math.Clamp(maxDist, 15, 400); applied.Add("maxDist"); }
@@ -804,8 +1001,6 @@ internal sealed class World
         if (TryBool("names", out var names)) { Opt.Names = names; applied.Add("names"); }
         if (TryBool("headMarker", out var headMarker)) { Opt.HeadMarker = headMarker; applied.Add("headMarker"); }
         if (TryBool("offscreen", out var offscreen)) { Opt.Offscreen = offscreen; applied.Add("offscreen"); }
-        if (TryBool("groundCross", out var groundCross)) { Opt.GroundCross = groundCross; applied.Add("groundCross"); }
-        if (TryBool("grid", out var grid)) { Opt.Grid = grid; applied.Add("grid"); }
         if (TryBool("radar", out var radar)) { Opt.Radar = radar; applied.Add("radar"); }
         if (TryBool("weapons", out var weapons)) { Opt.Weapons = weapons; applied.Add("weapons"); }
         if (TryBool("enabled", out var enabled)) { Opt.Enabled = enabled; applied.Add("enabled"); }
